@@ -7,6 +7,6 @@ def get_config():
     config.actor_lr = 3e-4
     config.critic_lr = 3e-4
     config.discount = 0.99
-    config.num_qs = 2
     config.tau = 0.005  # For soft target updates.
+    config.T = 15
     return config

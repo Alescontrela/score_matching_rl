@@ -24,7 +24,7 @@ from jaxrl5.wrappers.wandb_video import WANDBVideo
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string("project_name", "jaxrl5_online", "wandb project name.")
-flags.DEFINE_string("env_name", "walker_walk", "Environment name.")
+flags.DEFINE_string("env_name", "cartpole_balance", "Environment name.")
 flags.DEFINE_integer("seed", 42, "Random seed.")
 flags.DEFINE_integer("eval_episodes", 1, "Number of episodes used for evaluation.")
 flags.DEFINE_integer("log_interval", 1000, "Logging interval.")

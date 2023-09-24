@@ -38,21 +38,18 @@ def tensorstats(tensor, prefix=None):
 
 class ScoreMatchingLearner(Agent):
     score_model: TrainState
-    target_score_model: TrainState
-    critic: TrainState
-    target_critic: TrainState
+    critic_1: TrainState
+    critic_2: TrainState
+    target_critic_1: TrainState
+    target_critic_2: TrainState
     discount: float
     tau: float
     actor_tau: float
-    critic_hyperparam: float
     act_dim: int = struct.field(pytree_node=False)
-    min_T: int = struct.field(pytree_node=False)
     T: int = struct.field(pytree_node=False)
     M: int = struct.field(pytree_node=False) #How many repeat last steps
-    num_qs: int = struct.field(pytree_node=False)
     clip_sampler: bool = struct.field(pytree_node=False)
     ddpm_temperature: float
-    policy_temperature: float
     betas: jnp.ndarray
     alphas: jnp.ndarray
     alpha_hats: jnp.ndarray
@@ -70,13 +67,9 @@ class ScoreMatchingLearner(Agent):
         actor_hidden_dims: Sequence[int] = (256, 256, 256),
         discount: float = 0.99,
         tau: float = 0.005,
-        critic_hyperparam: float = 0.7,
         ddpm_temperature: float = 1.0,
-        num_qs: int = 2,
         actor_tau: float = 0.001,
         actor_layer_norm: bool = False,
-        policy_temperature: float = 3.0,
-        min_T: int = 3, 
         T: int = 5,
         time_dim: int = 64,
         M: int = 0,
@@ -123,29 +116,32 @@ class ScoreMatchingLearner(Agent):
         score_model = TrainState.create(
             apply_fn=actor_def.apply, params=actor_params,
             tx=optax.adam(learning_rate=actor_lr))
-        target_score_model = TrainState.create(
-            apply_fn=actor_def.apply, params=actor_params,
-            tx=optax.GradientTransformation(lambda _: None, lambda _: None))
 
+        # Initialize critics.
         critic_base_cls = partial(
-            MLP,
-            hidden_dims=critic_hidden_dims,
-            activate_final=True,
-        )
-        critic_cls = partial(StateActionValue, base_cls=critic_base_cls)
-        critic_def = Ensemble(critic_cls, num=num_qs)
-        critic_params = critic_def.init(critic_key, observations, actions)["params"]
-        critic = TrainState.create(
+            MLP, hidden_dims=critic_hidden_dims, activate_final=True)
+        critic_def = StateActionValue(critic_base_cls)
+        critic_key_1, critic_key_2 = jax.random.split(critic_key, 2)
+        critic_params_1 = critic_def.init(critic_key_1, observations, actions)["params"]
+        critic_params_2 = critic_def.init(critic_key_2, observations, actions)["params"]
+        critic_1 = TrainState.create(
             apply_fn=critic_def.apply,
-            params=critic_params,
-            tx=optax.adam(learning_rate=critic_lr),
-        )
-        target_critic_def = Ensemble(critic_cls, num=num_qs)
-        target_critic = TrainState.create(
+            params=critic_params_1,
+            tx=optax.adam(learning_rate=critic_lr))
+        critic_2 = TrainState.create(
+            apply_fn=critic_def.apply,
+            params=critic_params_2,
+            tx=optax.adam(learning_rate=critic_lr))
+
+        target_critic_def = StateActionValue(critic_base_cls)
+        target_critic_1 = TrainState.create(
             apply_fn=target_critic_def.apply,
-            params=critic_params,
-            tx=optax.GradientTransformation(lambda _: None, lambda _: None),
-        )
+            params=critic_params_1,
+            tx=optax.GradientTransformation(lambda _: None, lambda _: None),)
+        target_critic_2 = TrainState.create(
+            apply_fn=target_critic_def.apply,
+            params=critic_params_2,
+            tx=optax.GradientTransformation(lambda _: None, lambda _: None),)
 
         if beta_schedule == 'cosine':
             betas = jnp.array(cosine_beta_schedule(T))
@@ -162,65 +158,88 @@ class ScoreMatchingLearner(Agent):
         return cls(
             actor=None,
             score_model=score_model,
-            target_score_model=target_score_model,
-            critic=critic,
-            target_critic=target_critic,
+            critic_1=critic_1,
+            critic_2=critic_2,
+            target_critic_1=target_critic_1,
+            target_critic_2=target_critic_2,
             tau=tau,
             discount=discount,
             rng=rng,
             betas=betas,
             alpha_hats=alpha_hat,
             act_dim=action_dim,
-            min_T=min_T,
             T=T,
             M=M,
             alphas=alphas,
-            num_qs=num_qs,
             ddpm_temperature=ddpm_temperature,
             actor_tau=actor_tau,
-            critic_hyperparam=critic_hyperparam,
             clip_sampler=clip_sampler,
-            policy_temperature=policy_temperature,
         )
 
     def update_q(agent, batch: DatasetDict) -> Tuple[Agent, Dict[str, float]]:
-
-        # Sample actions for next state.
+        (B, _) = batch['observations'].shape
+        (_, A) = batch['actions'].shape
+        # Sample actions for next state. TODO(alescontrela): Add noise.
         key, rng = jax.random.split(agent.rng)
         next_actions, rng = ddpm_sampler(
             agent.score_model.apply_fn,
-            agent.target_score_model.params,
+            agent.score_model.params,
             agent.T, rng, agent.act_dim,
             batch['next_observations'],
             agent.alphas, agent.alpha_hats,
             agent.betas, agent.ddpm_temperature,
             agent.M, agent.clip_sampler)
-        key, rng = jax.random.split(rng)
-        target_params = subsample_ensemble(
-            key, agent.target_critic.params, agent.num_qs, agent.num_qs)
-        key, rng = jax.random.split(rng)
-        next_qs = agent.target_critic.apply_fn(
-            {"params": target_params}, batch["next_observations"],
-            next_actions, False, rngs={"dropout": key})
-        key, rng = jax.random.split(rng)
-        next_V = next_qs.min(axis=0)
-        target_q = batch["rewards"] + agent.discount * batch["masks"] * next_V
-        def critic_loss_fn(critic_params) -> Tuple[jnp.ndarray, Dict[str, float]]:
-            qs = agent.critic.apply_fn(
-                {"params": critic_params}, batch["observations"], batch["actions"]
-            )
-            critic_loss = ((qs - sg(target_q)) ** 2)
-            metrics = tensorstats(critic_loss, 'critic_loss')
-            metrics.update(tensorstats(qs, 'qs'))
-            metrics.update(tensorstats(target_q, 'target_qs'))
-            return critic_loss.mean(), metrics
+        key, rng = jax.random.split(rng, 2)
+        noise = jax.random.normal(key, shape=next_actions.shape) * 0.1
+        next_actions = next_actions + noise
+        next_actions = jnp.clip(next_actions, -1.0, 1.0)
+        key, rng = jax.random.split(rng, 2)
+        assert next_actions.shape == (B, A)
 
-        grads, metrics = jax.grad(critic_loss_fn, has_aux=True)(agent.critic.params)
-        critic = agent.critic.apply_gradients(grads=grads)
-        target_critic_params = optax.incremental_update(
-            critic.params, agent.target_critic.params, agent.tau)
-        target_critic = agent.target_critic.replace(params=target_critic_params)
-        new_agent = agent.replace(critic=critic, target_critic=target_critic, rng=rng)
+        # Compute target q.
+        key, rng = jax.random.split(rng)
+        next_q_1 = agent.target_critic_1.apply_fn(
+            {"params": agent.target_critic_1.params}, batch["next_observations"],
+            next_actions, True, rngs={"dropout": key})
+        key, rng = jax.random.split(rng)
+        next_q_2 = agent.target_critic_2.apply_fn(
+            {"params": agent.target_critic_2.params}, batch["next_observations"],
+            next_actions, True, rngs={"dropout": key})
+        key, rng = jax.random.split(rng)
+        next_v = jnp.stack([next_q_1, next_q_2], 0).min(0)
+        target_q = batch["rewards"] + agent.discount * batch["masks"] * next_v
+        metrics = tensorstats(target_q, 'target_q')
+        assert target_q.shape == (B,)
+
+        def critic_loss_fn(critic_params) -> Tuple[jnp.ndarray, Dict[str, float]]:
+            q = agent.critic_1.apply_fn(
+                {"params": critic_params},
+                batch["observations"],
+                batch["actions"])
+            loss = ((q - sg(target_q)) ** 2)
+            assert loss.shape == (B,)
+            metrics = {**tensorstats(loss, 'c_loss'), **tensorstats(q, 'q')}
+            return loss.mean(), metrics
+
+        grads_c_1, metrics_c_1 = jax.grad(critic_loss_fn, has_aux=True)(agent.critic_1.params)
+        metrics.update({f'{k}_1': v for k, v in metrics_c_1.items()})
+        critic_1 = agent.critic_1.apply_gradients(grads=grads_c_1)
+
+        grads_c_2, metrics_c_2 = jax.grad(critic_loss_fn, has_aux=True)(agent.critic_2.params)
+        metrics.update({f'{k}_2': v for k, v in metrics_c_2.items()})
+        critic_2 = agent.critic_2.apply_gradients(grads=grads_c_2)
+
+        target_critic_1_params = optax.incremental_update(
+            critic_1.params, agent.target_critic_1.params, agent.tau)
+        target_critic_2_params = optax.incremental_update(
+            critic_2.params, agent.target_critic_2.params, agent.tau)
+        target_critic_1 = agent.target_critic_1.replace(params=target_critic_1_params)
+        target_critic_2 = agent.target_critic_2.replace(params=target_critic_2_params)
+        new_agent = agent.replace(
+            critic_1=critic_1, critic_2=critic_2,
+            target_critic_1=target_critic_1,
+            target_critic_2=target_critic_2,
+            rng=rng)
         return new_agent, metrics
 
     def update_actor(agent, batch: DatasetDict) -> Tuple[Agent, Dict[str, float]]:
@@ -241,10 +260,15 @@ class ScoreMatchingLearner(Agent):
         key, rng = jax.random.split(rng, 2)
 
         # Compute dQ/da. # TODO(alescontrela): Is this correct?
-        critic_jacobian = jax.grad(lambda actions: agent.critic.apply_fn(
-            {"params": agent.critic.params}, batch['observations'], actions).sum(),
+        critic_1_jacobian = jax.grad(lambda actions: agent.critic_1.apply_fn(
+            {"params": agent.critic_1.params}, batch['observations'], actions).sum(),
             has_aux=False)(noisy_actions)
-        assert critic_jacobian.shape == (B, A), (critic_jacobian.shape, (B, A))
+        assert critic_1_jacobian.shape == (B, A), (critic_1_jacobian.shape, (B, A))
+        critic_2_jacobian = jax.grad(lambda actions: agent.critic_2.apply_fn(
+            {"params": agent.critic_2.params}, batch['observations'], actions).sum(),
+            has_aux=False)(noisy_actions)
+        assert critic_2_jacobian.shape == (B, A), (critic_2_jacobian.shape, (B, A))
+        critic_jacobian = jnp.stack([critic_1_jacobian, critic_2_jacobian], 0).mean(0)
 
         def actor_loss_fn(
                 score_model_params) -> Tuple[jnp.ndarray, Dict[str, float]]:
@@ -252,7 +276,8 @@ class ScoreMatchingLearner(Agent):
                 {'params': score_model_params}, batch['observations'],
                 noisy_actions, time, rngs={'dropout': key}, training=True)
             assert eps_pred.shape == (B, A)
-            actor_loss = -1 * jnp.multiply(eps_pred, sg(critic_jacobian)).sum(-1)
+            # actor_loss = -1 * jnp.multiply(eps_pred, sg(critic_jacobian)).sum(-1)
+            actor_loss = jnp.power(sg(critic_jacobian) - eps_pred, 2).mean(-1)
             assert actor_loss.shape == (B,)
             metrics = tensorstats(actor_loss, 'actor_loss')
             metrics.update(tensorstats(eps_pred, 'eps_pred'))
@@ -263,14 +288,9 @@ class ScoreMatchingLearner(Agent):
         grads, metrics = jax.grad(actor_loss_fn, has_aux=True)(
             agent.score_model.params)
         score_model = agent.score_model.apply_gradients(grads=grads)
-        target_score_params = optax.incremental_update(
-            score_model.params, agent.target_score_model.params,
-            agent.actor_tau)
-        target_score_model = agent.target_score_model.replace(
-            params=target_score_params)
         new_agent = agent.replace(
             score_model=score_model,
-            target_score_model=target_score_model, rng=rng)
+            rng=rng)
         return new_agent, metrics
 
     @jax.jit
@@ -291,7 +311,7 @@ class ScoreMatchingLearner(Agent):
 
         actions, rng = ddpm_sampler(
             self.score_model.apply_fn,
-            self.target_score_model.params,
+            self.score_model.params,
             self.T, rng, self.act_dim, observations,
             self.alphas, self.alpha_hats,
             self.betas, self.ddpm_temperature,
@@ -304,6 +324,6 @@ class ScoreMatchingLearner(Agent):
     @jax.jit
     def update(self, batch: DatasetDict):
         new_agent = self
-        new_agent, actor_info = new_agent.update_actor(batch)
         new_agent, critic_info = new_agent.update_q(batch)
+        new_agent, actor_info = new_agent.update_actor(batch)
         return new_agent, {**actor_info, **critic_info}
