@@ -8,11 +8,11 @@ import jax.numpy as jnp
 import optax
 from flax.training.train_state import TrainState
 from flax import struct
-import numpy as np
 
 from jaxrl5.agents.agent import Agent
 from jaxrl5.data.dataset import DatasetDict
-from jaxrl5.networks import MLP, Ensemble, StateActionValue, subsample_ensemble, DDPM, FourierFeatures, cosine_beta_schedule, ddpm_sampler, vp_beta_schedule
+from jaxrl5.networks import MLP, StateActionValue, DDPM, FourierFeatures
+from jaxrl5.networks import cosine_beta_schedule, ddpm_sampler, vp_beta_schedule
 
 tree_map = jax.tree_util.tree_map
 sg = lambda x: tree_map(jax.lax.stop_gradient, x)
@@ -42,12 +42,11 @@ class ScoreMatchingLearner(Agent):
     critic_2: TrainState
     target_critic_1: TrainState
     target_critic_2: TrainState
+
     discount: float
     tau: float
-    actor_tau: float
     act_dim: int = struct.field(pytree_node=False)
     T: int = struct.field(pytree_node=False)
-    M: int = struct.field(pytree_node=False) #How many repeat last steps
     clip_sampler: bool = struct.field(pytree_node=False)
     ddpm_temperature: float
     betas: jnp.ndarray
@@ -68,11 +67,9 @@ class ScoreMatchingLearner(Agent):
         discount: float = 0.99,
         tau: float = 0.005,
         ddpm_temperature: float = 1.0,
-        actor_tau: float = 0.001,
         actor_layer_norm: bool = False,
         T: int = 5,
         time_dim: int = 64,
-        M: int = 0,
         clip_sampler: bool = True,
         beta_schedule: str = 'vp',
         decay_steps: Optional[int] = int(2e6),
@@ -110,8 +107,8 @@ class ScoreMatchingLearner(Agent):
         time = jnp.zeros((1, 1))
         observations = jnp.expand_dims(observations, axis = 0)
         actions = jnp.expand_dims(actions, axis = 0)
-        actor_params = actor_def.init(actor_key, observations, actions,
-                                        time)['params']
+        actor_params = actor_def.init(
+            actor_key, observations, actions, time)['params']
 
         score_model = TrainState.create(
             apply_fn=actor_def.apply, params=actor_params,
@@ -169,17 +166,16 @@ class ScoreMatchingLearner(Agent):
             alpha_hats=alpha_hat,
             act_dim=action_dim,
             T=T,
-            M=M,
             alphas=alphas,
             ddpm_temperature=ddpm_temperature,
-            actor_tau=actor_tau,
             clip_sampler=clip_sampler,
         )
 
     def update_q(agent, batch: DatasetDict) -> Tuple[Agent, Dict[str, float]]:
         (B, _) = batch['observations'].shape
         (_, A) = batch['actions'].shape
-        # Sample actions for next state. TODO(alescontrela): Add noise.
+
+        # Sample actions for next state.
         key, rng = jax.random.split(agent.rng)
         next_actions, rng = ddpm_sampler(
             agent.score_model.apply_fn,
@@ -188,7 +184,7 @@ class ScoreMatchingLearner(Agent):
             batch['next_observations'],
             agent.alphas, agent.alpha_hats,
             agent.betas, agent.ddpm_temperature,
-            agent.M, agent.clip_sampler)
+            agent.clip_sampler)
         key, rng = jax.random.split(rng, 2)
         noise = jax.random.normal(key, shape=next_actions.shape) * 0.1
         next_actions = next_actions + noise
@@ -215,7 +211,7 @@ class ScoreMatchingLearner(Agent):
             q = agent.critic_1.apply_fn(
                 {"params": critic_params},
                 batch["observations"],
-                batch["actions"])
+                batch["actions"], training=True)
             loss = ((q - sg(target_q)) ** 2)
             assert loss.shape == (B,)
             metrics = {**tensorstats(loss, 'c_loss'), **tensorstats(q, 'q')}
@@ -259,7 +255,7 @@ class ScoreMatchingLearner(Agent):
         noisy_actions = alpha_1 * batch['actions'] + alpha_2 * noise_sample
         key, rng = jax.random.split(rng, 2)
 
-        # Compute dQ/da. # TODO(alescontrela): Is this correct?
+        # Compute dQ/da.
         critic_1_jacobian = jax.grad(lambda actions: agent.critic_1.apply_fn(
             {"params": agent.critic_1.params}, batch['observations'], actions).sum(),
             has_aux=False)(noisy_actions)
@@ -277,7 +273,7 @@ class ScoreMatchingLearner(Agent):
                 noisy_actions, time, rngs={'dropout': key}, training=True)
             assert eps_pred.shape == (B, A)
             # actor_loss = -1 * jnp.multiply(eps_pred, sg(critic_jacobian)).sum(-1)
-            actor_loss = jnp.power(sg(critic_jacobian) - eps_pred, 2).mean(-1)
+            actor_loss = jnp.power(-sg(critic_jacobian) - eps_pred, 2).mean(-1)
             assert actor_loss.shape == (B,)
             metrics = tensorstats(actor_loss, 'actor_loss')
             metrics.update(tensorstats(eps_pred, 'eps_pred'))
@@ -315,7 +311,7 @@ class ScoreMatchingLearner(Agent):
             self.T, rng, self.act_dim, observations,
             self.alphas, self.alpha_hats,
             self.betas, self.ddpm_temperature,
-            self.M, self.clip_sampler)
+            self.clip_sampler)
         assert actions.shape == (1, self.act_dim)
         _, rng = jax.random.split(rng, 2)
         return jnp.squeeze(actions), self.replace(rng=rng)
