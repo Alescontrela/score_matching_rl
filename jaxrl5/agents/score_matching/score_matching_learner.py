@@ -52,6 +52,8 @@ class ScoreMatchingLearner(Agent):
     betas: jnp.ndarray
     alphas: jnp.ndarray
     alpha_hats: jnp.ndarray
+    # global scaling factor for grad_a Q(s, a)
+    M_q: float
 
     @classmethod
     def create(
@@ -73,6 +75,7 @@ class ScoreMatchingLearner(Agent):
         clip_sampler: bool = True,
         beta_schedule: str = 'vp',
         decay_steps: Optional[int] = int(2e6),
+        M_q: float = 0.5,
     ):
 
         rng = jax.random.PRNGKey(seed)
@@ -273,7 +276,7 @@ class ScoreMatchingLearner(Agent):
                 noisy_actions, time, rngs={'dropout': key}, training=True)
             assert eps_pred.shape == (B, A)
             # actor_loss = -1 * jnp.multiply(eps_pred, sg(critic_jacobian)).sum(-1)
-            actor_loss = jnp.power(-sg(critic_jacobian) - eps_pred, 2).mean(-1)
+            actor_loss = jnp.power(-agent.M_q*sg(critic_jacobian) - eps_pred, 2).mean(-1)
             assert actor_loss.shape == (B,)
             metrics = tensorstats(actor_loss, 'actor_loss')
             metrics.update(tensorstats(eps_pred, 'eps_pred'))
