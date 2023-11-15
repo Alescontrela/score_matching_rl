@@ -88,6 +88,7 @@ def ddpm_sampler(actor_apply_fn, actor_params, T, rng, act_dim, observations, al
         rng, key = jax.random.split(rng, 2)
         z = jax.random.normal(
             key, shape=(observations.shape[0], current_x.shape[1]),)
+
         z_scaled = sample_temperature * z
         current_x = current_x + (time > 0) * (jnp.sqrt(betas[time]) * z_scaled)
         current_x = jnp.clip(current_x, -1, 1) if clip_sampler else current_x
@@ -99,3 +100,55 @@ def ddpm_sampler(actor_apply_fn, actor_params, T, rng, act_dim, observations, al
         jnp.arange(T-1, -1, -1), unroll=5)
     action_0 = jnp.clip(action_0, -1, 1)
     return action_0, rng
+
+@partial(jax.jit, static_argnames=('actor_apply_fn', 'act_dim', 'T', 'repeat_last_step', 'clip_sampler', 'training'))
+def ddpm_sampler_keepinner(actor_apply_fn, actor_params, T, rng, act_dim, observations, alphas, alpha_hats, betas, sample_temperature, clip_sampler, training = False):
+
+    batch_size = observations.shape[0]
+    
+    def fn(input_tuple, time):
+        current_x, logprob_total, rng = input_tuple
+
+        input_time = jnp.expand_dims(
+            jnp.array([time]).repeat(current_x.shape[0]), axis=1)
+        eps_pred = actor_apply_fn(
+            {"params": actor_params},
+            observations, current_x,
+            input_time, training=training)
+
+        alpha_1 = 1 / jnp.sqrt(alphas[time])
+        alpha_2 = ((1 - alphas[time]) / (jnp.sqrt(1 - alpha_hats[time])))
+        current_x_plus = alpha_1 * (current_x - alpha_2 * eps_pred)
+
+        rng, key = jax.random.split(rng, 2)
+        z = jax.random.normal(
+            key, shape=(observations.shape[0], current_x.shape[1]),)
+        z_scaled = sample_temperature * z
+        current_z = current_x_plus + (time > 0) * (jnp.sqrt(betas[time]) * z_scaled)
+
+        # compute logprob of current_z, scaled norm with respect to current_x
+        logprobs = -0.5 * jnp.sum((current_z - current_x) ** 2, axis=-1)
+        # scale and normalize if nonzero variance, otherwise set to 0
+        condition = (time > 0) & (jnp.sqrt(betas[time]) * sample_temperature > 0)
+        logprobs = jax.lax.cond(condition, 
+             lambda _: (1 / (betas[time] * sample_temperature**2))* logprobs, 
+             lambda _: jnp.zeros_like(logprobs),
+             None)
+        logprob_total = logprob_total + logprobs
+
+        current_x = jnp.clip(current_z, -1, 1) if clip_sampler else current_x
+
+        return (current_x, logprob_total, rng), ()
+
+    key, rng = jax.random.split(rng, 2)
+    (action_0, logprob_total, rng), () = jax.lax.scan(
+        fn, (jax.random.normal(key, (batch_size, act_dim)), jnp.zeros(batch_size), rng),
+        jnp.arange(T-1, -1, -1), unroll=5)
+    action_0 = jnp.clip(action_0, -1, 1)
+    logprob_total = (1/T)*logprob_total
+
+    # new actions have the logprob totals appended at the end of each action
+    # log_prob_total = jnp.expand_dims(logprob_total, axis=-1)
+    # all_actions = jnp.concatenate((action_0, log_prob_total), axis=1)
+    # assert all_actions.shape == (batch_size, act_dim+1)
+    return action_0, logprob_total, rng
