@@ -75,7 +75,7 @@ class ScoreMatchingLearner(Agent):
         clip_sampler: bool = True,
         beta_schedule: str = 'vp',
         decay_steps: Optional[int] = int(2e6),
-        M_q: float = 0.5,
+        M_q: float = 1,
     ):
 
         rng = jax.random.PRNGKey(seed)
@@ -172,6 +172,7 @@ class ScoreMatchingLearner(Agent):
             alphas=alphas,
             ddpm_temperature=ddpm_temperature,
             clip_sampler=clip_sampler,
+            M_q=M_q,
         )
 
     def update_q(agent, batch: DatasetDict) -> Tuple[Agent, Dict[str, float]]:
@@ -275,7 +276,6 @@ class ScoreMatchingLearner(Agent):
                 {'params': score_model_params}, batch['observations'],
                 noisy_actions, time, rngs={'dropout': key}, training=True)
             assert eps_pred.shape == (B, A)
-            # actor_loss = -1 * jnp.multiply(eps_pred, sg(critic_jacobian)).sum(-1)
             actor_loss = jnp.power(-agent.M_q*sg(critic_jacobian) - eps_pred, 2).mean(-1)
             assert actor_loss.shape == (B,)
             metrics = tensorstats(actor_loss, 'actor_loss')
