@@ -6,3 +6,4 @@ from jaxrl5.agents.sac.sac_learner import SACLearner
 from jaxrl5.agents.td3.td3_learner import TD3Learner
 from jaxrl5.agents.ddpm_iql.ddpm_iql_learner import DDPMIQLLearner
 from jaxrl5.agents.score_matching.score_matching_learner import ScoreMatchingLearner
+from jaxrl5.agents.score_matching.ddpm_policygrad_learner import DiffusionPolicygradLearner
