@@ -2,6 +2,7 @@
 #! /usr/bin/env python
 # import dmcgym
 import gym
+import jax
 import tqdm
 import wandb
 from absl import app, flags
@@ -15,7 +16,7 @@ os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
 os.environ['MUJOCO_GL'] = 'egl'
 
 
-from jaxrl5.agents import DiffusionPolicygradLearner
+from jaxrl5.agents import DiffusionOnlineLearner
 from jaxrl5.data import ReplayBuffer
 from jaxrl5.evaluation import evaluate
 from jaxrl5.wrappers import wrap_gym
@@ -24,6 +25,7 @@ from jaxrl5.wrappers.wandb_video import WANDBVideo
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string("project_name", "jaxrl5_online", "wandb project name.")
+flags.DEFINE_string("run_name", "", "wandb run name.")
 flags.DEFINE_string("env_name", "cartpole_balance", "Environment name.")
 flags.DEFINE_integer("seed", 42, "Random seed.")
 flags.DEFINE_integer("eval_episodes", 1, "Number of episodes used for evaluation.")
@@ -36,11 +38,13 @@ flags.DEFINE_integer(
 )
 flags.DEFINE_boolean("tqdm", True, "Use tqdm progress bar.")
 flags.DEFINE_boolean("wandb", False, "Use wandb")
+flags.DEFINE_boolean("no_reset_env", False, "Turn off environment resets")
 flags.DEFINE_boolean("save_video", True, "Save videos during evaluation.")
+flags.DEFINE_boolean("use_policygrad", False, "Use policy gradient for updating policy. Normally uses Diffusion-QL")
 flags.DEFINE_integer("utd_ratio", 1, "Update to data ratio.")
 config_flags.DEFINE_config_file(
     "config",
-    "configs/diffusion_policygrad_config.py",
+    "configs/diffusion_online_config.py",
     "File path to the training hyperparameter configuration.",
     lock_config=False,
 )
@@ -48,7 +52,10 @@ config_flags.DEFINE_config_file(
 
 def main(_):
     if FLAGS.wandb:
-        wandb.init(project=FLAGS.project_name)
+        if FLAGS.run_name != "":
+            wandb.init(project=FLAGS.project_name, name=FLAGS.run_name, tags=[FLAGS.run_name])
+        else:
+            wandb.init(project=FLAGS.project_name)
         wandb.config.update(FLAGS)
 
     suite, task = FLAGS.env_name.split('_')
@@ -56,7 +63,8 @@ def main(_):
     # env = gym.make(FLAGS.env_name)
     env = wrap_gym(env, rescale_actions=True)
     env = gym.wrappers.RecordEpisodeStatistics(env, deque_size=1)
-    if FLAGS.wandb and FLAGS.save_video:
+    # note that no reseting env makes WANDBVIdeo env crazy slow
+    if FLAGS.wandb and FLAGS.save_video and not FLAGS.no_reset_env:
         env = WANDBVideo(env)
     env.seed(FLAGS.seed)
 
@@ -72,7 +80,7 @@ def main(_):
     kwargs = dict(FLAGS.config)
     model_cls = kwargs.pop("model_cls")
     agent = globals()[model_cls].create(
-        FLAGS.seed, env.observation_space, env.action_space, **kwargs
+        FLAGS.seed, env.observation_space, env.action_space, use_policygrad=FLAGS.use_policygrad, **kwargs
     )
 
     replay_buffer = ReplayBuffer(
@@ -111,15 +119,25 @@ def main(_):
         observation = next_observation
 
         if done:
-            observation, done = env.reset(), False
-            if FLAGS.wandb:
-                for k, v in info["episode"].items():
-                    decode = {"r": "return", "l": "length", "t": "time"}
-                    wandb.log({f"training/{decode[k]}": v}, step=i)
+            if not FLAGS.no_reset_env:
+                observation, done = env.reset(), False
+
+                if FLAGS.wandb:
+                    for k, v in info["episode"].items():
+                        decode = {"r": "return", "l": "length", "t": "time"}
+                        wandb.log({f"training/{decode[k]}": v}, step=i)
+            else:
+                done = False
+
+                if FLAGS.wandb and i % FLAGS.log_interval == 0:
+                    for k, v in info["episode"].items():
+                        decode = {"r": "return", "l": "length", "t": "time"}
+                        wandb.log({f"training/{decode[k]}": v}, step=i)
 
         if i >= FLAGS.start_training:
             batch = replay_buffer.sample(FLAGS.batch_size * FLAGS.utd_ratio)
             agent, update_info = agent.update(batch)
+
 
             if FLAGS.wandb and i % FLAGS.log_interval == 0:
                 for k, v in update_info.items():
@@ -134,7 +152,6 @@ def main(_):
             )
             for k, v in eval_info.items():
                 wandb.log({f"evaluation/{k}": v}, step=i)
-
 
 if __name__ == "__main__":
     app.run(main)

@@ -36,7 +36,7 @@ def tensorstats(tensor, prefix=None):
   return metrics
 
 
-class DiffusionPolicygradLearner(Agent):
+class DiffusionOnlineLearner(Agent):
     score_model: TrainState
     critic_1: TrainState
     critic_2: TrainState
@@ -52,6 +52,7 @@ class DiffusionPolicygradLearner(Agent):
     betas: jnp.ndarray
     alphas: jnp.ndarray
     alpha_hats: jnp.ndarray
+    use_policygrad: bool
 
     @classmethod
     def create(
@@ -73,8 +74,9 @@ class DiffusionPolicygradLearner(Agent):
         clip_sampler: bool = True,
         beta_schedule: str = 'vp',
         decay_steps: Optional[int] = int(2e6),
+        use_policygrad: bool = False
     ):
-
+        use_policygrad = use_policygrad
         rng = jax.random.PRNGKey(seed)
         rng, actor_key, critic_key = jax.random.split(rng, 3)
         actions = action_space.sample()
@@ -169,6 +171,7 @@ class DiffusionPolicygradLearner(Agent):
             alphas=alphas,
             ddpm_temperature=ddpm_temperature,
             clip_sampler=clip_sampler,
+            use_policygrad = use_policygrad
         )
 
     def update_q(agent, batch: DatasetDict) -> Tuple[Agent, Dict[str, float]]:
@@ -241,57 +244,7 @@ class DiffusionPolicygradLearner(Agent):
 
     def update_actor(agent, batch: DatasetDict) -> Tuple[Agent, Dict[str, float]]:
         B, _ = batch['actions'].shape
-        A = agent.act_dim 
-
-        # applying diffusion model policygrad formula
-        def actor_loss_fn_policygrad(
-                score_model_params) -> Tuple[jnp.ndarray, Dict[str, float]]:
-            # compute new action samples using params so we can autodiff
-            # through
-            # note we need to convert to batch operation
-            
-            # first time we dont do with respect to input, to ignore gradient
-            key, rng_main = jax.random.split(agent.rng)
-            actions_actorloss, _, rng = ddpm_sampler_keepinner(
-                agent.score_model.apply_fn,
-                agent.score_model.params,
-                agent.T, rng_main, agent.act_dim,
-                batch["observations"],
-                agent.alphas, agent.alpha_hats,
-                agent.betas, agent.ddpm_temperature,
-                agent.clip_sampler)
-            
-            # evaluate target critic on batch
-            key, rng = jax.random.split(rng)
-            target_q_1 = agent.target_critic_1.apply_fn(
-                {"params": agent.target_critic_1.params},
-                batch["observations"], actions_actorloss, True, rngs={"dropout": key})
-            key, rng = jax.random.split(rng)
-            target_q_2 = agent.target_critic_2.apply_fn(
-                {"params": agent.target_critic_2.params},
-                batch["observations"], actions_actorloss, True, rngs={"dropout": key})
-            target_q = jnp.stack([target_q_1, target_q_2], 0).min(0)
-
-            # now compute with respect to input for logprobs
-            _, logprobs, rng = ddpm_sampler_keepinner(
-                agent.score_model.apply_fn,
-                score_model_params,
-                agent.T, rng_main, agent.act_dim,
-                batch["observations"],
-                agent.alphas, agent.alpha_hats,
-                agent.betas, agent.ddpm_temperature,
-                agent.clip_sampler)
-            
-
-            # extract logprobs
-            # logprobs = actions_actorloss_logprob[:, -1]
-            
-            # compute diffusion-QL loss
-            actor_loss = -target_q*logprobs
-            
-            assert actor_loss.shape == (B,)
-            metrics = tensorstats(actor_loss, 'actor_loss')
-            return actor_loss.mean(0), metrics
+        A = agent.act_dim
 
         # Diffusion-QL Q function, basically just autodiffing the
         # computation all the way from action sampling to Q computation
@@ -329,9 +282,78 @@ class DiffusionPolicygradLearner(Agent):
             metrics = tensorstats(actor_loss, 'actor_loss')
             return actor_loss.mean(0), metrics
 
+        # applying diffusion model policygrad formula. note this is mainly for testing,
+        # does not work as implemented, which is theoretically expected -- see
+        # Section 3 of Psenka et al. 2024 https://arxiv.org/abs/2312.11752
+        def actor_loss_fn_policygrad(
+                score_model_params) -> Tuple[jnp.ndarray, Dict[str, float]]:
+            # compute new action samples using params so we can autodiff
+            # through
+            # note we need to convert to batch operation
+            
+            # first time we dont do with respect to input, to ignore gradient
+            # w.r.t. actions_actorloss fed into q funcs
+            # IF YOU WANT TO TRY GRADIENTS THROUGH Q TOO (we tested this is even worse),
+            # change _ to logprobs and comment out the logprobs line below
+            key, rng_main = jax.random.split(agent.rng)
+            actions_actorloss, _, rng = ddpm_sampler_keepinner(
+                agent.score_model.apply_fn,
+                agent.score_model.params,
+                agent.T, rng_main, agent.act_dim,
+                batch["observations"],
+                agent.alphas, agent.alpha_hats,
+                agent.betas, agent.ddpm_temperature,
+                agent.clip_sampler)
+            
+            
+            # evaluate target critic on batch
+            key, rng = jax.random.split(rng)
+            target_q_1 = agent.target_critic_1.apply_fn(
+                {"params": agent.target_critic_1.params},
+                batch["observations"], actions_actorloss, True, rngs={"dropout": key})
+            key, rng = jax.random.split(rng)
+            target_q_2 = agent.target_critic_2.apply_fn(
+                {"params": agent.target_critic_2.params},
+                batch["observations"], actions_actorloss, True, rngs={"dropout": key})
+            target_q = jnp.stack([target_q_1, target_q_2], 0).min(0)
+
+            # now compute with respect to input for logprobs
+            # NOTE WE USE SAME RNG AS BEFORE, so there is a match btwn logprobs and actions
+            _, logprobs, rng = ddpm_sampler_keepinner(
+                agent.score_model.apply_fn,
+                score_model_params,
+                agent.T, rng_main, agent.act_dim,
+                batch["observations"],
+                agent.alphas, agent.alpha_hats,
+                agent.betas, agent.ddpm_temperature,
+                agent.clip_sampler)
+            
+
+            # extract logprobs
+            # logprobs = actions_actorloss_logprob[:, -1]
+            
+            # compute policygrad loss
+            actor_loss = -target_q*logprobs
+            
+            assert actor_loss.shape == (B,)
+            metrics = tensorstats(actor_loss, 'actor_loss')
+            return actor_loss.mean(0), metrics
+
         key, rng = jax.random.split(agent.rng, 2)
-        grads, metrics = jax.grad(actor_loss_fn_policygrad, has_aux=True)(
-            agent.score_model.params)
+
+        # choosing whether to use policygrad or not
+
+        def true_fun():
+            return jax.grad(actor_loss_fn_policygrad, has_aux=True)(
+                agent.score_model.params)
+        def false_fun():
+            return jax.grad(actor_loss_fn_diffQ, has_aux=True)(
+                agent.score_model.params)
+
+        grads, metrics = jax.lax.cond(agent.use_policygrad,
+                             true_fun,
+                             false_fun)
+        
         # print 2-norm of gradients
         # @jax.jit
         # def my_function(x):
@@ -350,10 +372,9 @@ class DiffusionPolicygradLearner(Agent):
     def sample_actions(self, observations: jnp.ndarray):
         actions, new_agent = self.eval_actions(observations)
         key, rng = jax.random.split(new_agent.rng, 2)
-        # no noising for policygrad, need to keep correct logprobs
-        # noise = jax.random.normal(key, shape=actions.shape) * 0.1
-        # actions = actions + noise
-        # actions = jnp.clip(actions, -1.0, 1.0)
+        noise = jax.random.normal(key, shape=actions.shape) * 0.1
+        actions = actions + noise
+        actions = jnp.clip(actions, -1.0, 1.0)
         key, rng = jax.random.split(rng, 2)
         return actions, new_agent.replace(rng=rng)
 
