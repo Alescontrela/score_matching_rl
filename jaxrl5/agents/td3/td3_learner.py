@@ -248,7 +248,7 @@ class TD3Learner(Agent):
 
     def eval_actions(self, observations: np.ndarray) -> np.ndarray:
         actions = _eval_actions(self.actor.apply_fn, self.actor.params, observations)
-        return np.asarray(actions)
+        return np.asarray(actions), self
 
     def sample_actions(self, observations: np.ndarray) -> np.ndarray:
         actions, new_rng = _sample_actions(
