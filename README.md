@@ -146,7 +146,7 @@ We welcome contributions to enhance the repository. If you encounter any issues 
 If you use this code or our QSM algorithm in your research, please cite our paper:
 
 ```
-@inproceedings{psenka2024learning,
+@inproceedings{psenka2024qsm,
   title={Learning a Diffusion Model Policy from Rewards via Q-Score Matching},
   author={Psenka, Michael and Escontrela, Alejandro and Abbeel, Pieter and Ma, Yi},
   booktitle={Proceedings of the 41st International Conference on Machine Learning},
