@@ -6,7 +6,7 @@ This repository provides the official implementation of the Q-Score Matching alg
 
 Diffusion models have gained popularity in generative tasks due to their ability to represent complex distributions over continuous spaces. In the context of reinforcement learning, they offer both expressiveness and ease of sampling, making them a promising choice for policy representation. While many works have been done in the offline setting, the online/off-policy setting for diffusion model policies is still relatively underexplored.
 
-The code is built on top of the [jaxrl](https://github.com/ikostrikov/jaxrl) framework.
+The code is built on top of a re-implementation of the [jaxrl](https://github.com/ikostrikov/jaxrl) framework.
 
 ## Installation
 
