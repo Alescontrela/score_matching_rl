@@ -66,7 +66,7 @@ class DDPM(nn.Module):
 
         return self.reverse_encoder_cls()(reverse_input, training=training)
 
-@partial(jax.jit, static_argnames=('actor_apply_fn', 'act_dim', 'T', 'repeat_last_step', 'clip_sampler', 'training'))
+@partial(jax.jit, static_argnames=('actor_apply_fn', 'act_dim', 'T', 'clip_sampler', 'training'))
 def ddpm_sampler(actor_apply_fn, actor_params, T, rng, act_dim, observations, alphas, alpha_hats, betas, sample_temperature, clip_sampler, training = False):
 
     batch_size = observations.shape[0]
@@ -101,7 +101,7 @@ def ddpm_sampler(actor_apply_fn, actor_params, T, rng, act_dim, observations, al
     action_0 = jnp.clip(action_0, -1, 1)
     return action_0, rng
 
-@partial(jax.jit, static_argnames=('actor_apply_fn', 'act_dim', 'T', 'repeat_last_step', 'clip_sampler', 'training'))
+@partial(jax.jit, static_argnames=('actor_apply_fn', 'act_dim', 'T', 'clip_sampler', 'training'))
 def ddpm_sampler_keepinner(actor_apply_fn, actor_params, T, rng, act_dim, observations, alphas, alpha_hats, betas, sample_temperature, clip_sampler, training = False):
 
     batch_size = observations.shape[0]
