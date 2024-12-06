@@ -9,7 +9,7 @@ def get_config():
     config.tau = 0.005  # For soft target updates.
     config.T = 5
     config.M_q = 50
-    config.ddpm_temperature=0.2
+    # config.ddpm_temperature=0.2
     config.critic_hidden_dims=(512,512)
     config.actor_hidden_dims=(512,512)
     return config
