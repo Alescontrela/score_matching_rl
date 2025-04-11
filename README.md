@@ -48,6 +48,39 @@ pip install ./
 
 - **[DDPM Implementation](jaxrl5/networks/diffusion.py)**: Contains the implementation of Denoising Diffusion Probabilistic Models (DDPM), Fourier Features, and various beta schedules essential for the score matching process.
 
+## Tuning QSM
+
+Hyperparameters can be found and modified in [examples/states/configs/score_matching_config.py](examples/states/configs/score_matching_config.py). An example config looks like the following:
+
+```python
+import ml_collections
+
+def get_config():
+    config = ml_collections.ConfigDict()
+    config.model_cls = "ScoreMatchingLearner"
+    config.actor_lr = 3e-4
+    config.critic_lr = 3e-4
+    config.discount = 0.99
+    config.tau = 0.005
+    config.T = 5
+    config.M_q = 50
+    config.critic_hidden_dims=(512,512)
+    config.actor_hidden_dims=(512,512)
+    return config
+```
+
+For QSM, `M_q` is probably the most important parameter to tune. This corresponds to how much we scale the Q-score when matching the DDPM noise model to it ($\alpha$ in Alg. 1 of the main paper https://arxiv.org/pdf/2312.11752):
+    
+$$min_\theta \lVert\epsilon_\theta(a, s, t) - M_q \nabla_a Q(s, a)\rVert_2^2$$
+
+We us "M_q" in code to not confuse with $\alpha$'s from DDPM noise scheduling.
+
+`M_q` corresponds to something akin to how aggresive the learning process is: lower M_q will take more conservative steps through the denoising process and remain higher entropy, and higher M_q will take more aggressive steps towards optimal actions.
+
+This is also analogous to a sort of explore/expoit tradeoff, but note that QSM will typically learn explorative policies on convergence regardless, see for example Fig. 4 & 5 of the main paper.
+
+For more difficult tasks like `quadruped_walk` and `humanoid_walk`, a more aggressive (e.g. `M_q = 120`) may perform better.
+
 
 ## Usage Example
 
