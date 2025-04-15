@@ -79,7 +79,7 @@ We us "M_q" in code to not confuse with $\alpha$'s from DDPM noise scheduling.
 
 This is also analogous to a sort of explore/expoit tradeoff, but note that QSM will typically learn explorative policies on convergence regardless, see for example Fig. 4 & 5 of the main paper.
 
-For more difficult tasks like `quadruped_walk` and `humanoid_walk`, a more aggressive (e.g. `M_q = 120`) may perform better.
+For more difficult tasks like `quadruped_walk` and `humanoid_walk`, a more aggressive `M_q` (e.g. `M_q = 120`) may perform better.
 
 
 ## Usage Example
